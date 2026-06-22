@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { describe, expect, it } from "vitest";
 
 import { installHermesPlugin } from "../../scripts/install-hermes-plugin.mjs";
 
