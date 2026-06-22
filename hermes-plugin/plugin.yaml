@@ -1,0 +1,5 @@
+name: socraticode
+version: 0.1.0
+description: SocratiCode support for Hermes Agent — bundled workflow skill plus diagnostics.
+provides_tools:
+  - socraticode_doctor

@@ -1,0 +1,547 @@
+--- a/package.json
++++ b/package.json
+@@ -22,7 +22,8 @@
+     "test:integration": "vitest run tests/integration/",
+     "test:e2e": "vitest run tests/e2e/",
+     "test:watch": "vitest",
+-    "test:coverage": "vitest run --coverage"
++    "test:coverage": "vitest run --coverage",
++    "install:hermes-plugin": "node scripts/install-hermes-plugin.mjs"
+   },
+   "keywords": [
+     "mcp",
+@@ -56,6 +57,8 @@
+     "agents",
+     "hooks",
+     ".mcp.json",
++    "hermes-plugin",
++    "scripts/install-hermes-plugin.mjs",
+     "LICENSE",
+     "LICENSE-COMMERCIAL",
+     "README.md",
+--- a/README.md
++++ b/README.md
+@@ -121,6 +121,30 @@
+ command = "npx"
+ args = ["-y", "socraticode"]
+ ```
++
++**Hermes Agent** — install the Hermes plugin payload, then add SocratiCode as an MCP server:
++
++```bash
++npx -y socraticode --install-hermes-plugin
++```
++
++Add the following to `~/.hermes/config.yaml`:
++
++```yaml
++mcp_servers:
++  socraticode:
++    command: "npx"
++    args: ["-y", "socraticode"]
++```
++
++Then start Hermes with the SocratiCode MCP server and plugin toolset enabled:
++
++```bash
++hermes chat --toolsets "terminal,file,mcp-socraticode,socraticode-plugin"
++```
++
++On first load, the plugin installs the bundled `socraticode` skill into `~/.hermes/skills/`. If the MCP tools do not appear, run `socraticode_doctor` inside Hermes after startup.
++
+ 
+ Restart your host. On first use SocratiCode automatically pulls Docker images, starts its own Qdrant and Ollama containers, and downloads the embedding model — one-time setup, ~5 minutes depending on your connection. After that, it starts in seconds.
+ 
+@@ -236,6 +260,8 @@
+ ## Agent Instructions
+ 
+ > **Claude Code plugin users**: These instructions are included automatically as skills in the SocratiCode plugin. You don't need to copy them into `CLAUDE.md`. The section below is for non-Claude Code hosts (VS Code, Cursor, Claude Desktop, etc.).
++> **Hermes plugin users**: The same workflow is bundled as the `socraticode` Hermes skill and is installed automatically the first time the plugin loads. You only need to copy these instructions into `AGENTS.md` if you want project-local overrides.
++
+ 
+ For best results, add instructions like the following to your AI assistant's system prompt, `CLAUDE.md`, `AGENTS.md`, or equivalent instructions file. The core principle: **search before reading**. The index gives you a map of the codebase in milliseconds; raw file reading is expensive and context-consuming.
+ 
+@@ -369,6 +395,31 @@
+    Works when Claude Code is launched from a terminal. Note: IDE-launched sessions (e.g. VS Code opened from Finder/Dock) may not inherit shell profile variables — use option 1 instead.
+ 
+ Restart Claude Code after changing variables. See [Environment Variables](#environment-variables) for all options.
++
++#### Hermes Agent
++
++SocratiCode includes a small Hermes plugin payload that bundles the search-first workflow as a Hermes skill and provides a diagnostic tool for troubleshooting. Install the plugin payload with:
++
++```bash
++npx -y socraticode --install-hermes-plugin
++```
++
++This copies the plugin into `~/.hermes/plugins/socraticode`. Then add the MCP server to `~/.hermes/config.yaml`:
++
++```yaml
++mcp_servers:
++  socraticode:
++    command: "npx"
++    args: ["-y", "socraticode"]
++```
++
++Start Hermes with the SocratiCode MCP toolset plus the plugin toolset:
++
++```bash
++hermes chat --toolsets "terminal,file,mcp-socraticode,socraticode-plugin"
++```
++
++The first time Hermes loads the plugin, it installs the bundled `socraticode` skill to `~/.hermes/skills/socraticode/SKILL.md` (without overwriting user edits). If tools are missing or the server is not connecting, run `socraticode_doctor` from within Hermes to verify that Node.js, `npx`, Docker, and the MCP config are all present.
+ 
+ #### npx (recommended for all other MCP hosts — no installation)
+ 
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -14,6 +14,25 @@
+ import { handleManageTool } from "./tools/manage-tools.js";
+ import { handleQueryTool } from "./tools/query-tools.js";
+ 
++async function maybeHandleCliMode(): Promise<boolean> {
++  const args = new Set(process.argv.slice(2));
++  if (!args.has("--install-hermes-plugin")) {
++    return false;
++  }
++
++  const installerUrl = new URL("../scripts/install-hermes-plugin.mjs", import.meta.url);
++  const installer = (await import(installerUrl.href)) as {
++    installHermesPlugin: (options?: { force?: boolean }) => Promise<{ message: string }>;
++  };
++
++  const result = await installer.installHermesPlugin({
++    force: args.has("--force"),
++  });
++
++  console.log(result.message);
++  return true;
++}
++
+ const server = new McpServer(
+   {
+     name: "socraticode",
+@@ -369,6 +388,10 @@
+ // ── Start server ─────────────────────────────────────────────────────────
+ 
+ async function main() {
++  if (await maybeHandleCliMode()) {
++    return;
++  }
++
+   const transport = new StdioServerTransport();
+   await server.connect(transport);
+ 
+--- a/scripts/install-hermes-plugin.mjs
++++ b/scripts/install-hermes-plugin.mjs
+@@ -0,0 +1,106 @@
++#!/usr/bin/env node
++// SPDX-License-Identifier: AGPL-3.0-only
++// Copyright (C) 2026 Giancarlo Erra - Altaire Limited
++
++import { promises as fs } from "node:fs";
++import os from "node:os";
++import path from "node:path";
++import { fileURLToPath, pathToFileURL } from "node:url";
++
++const PLUGIN_NAME = "socraticode";
++
++function repoRootFromHere() {
++  return path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
++}
++
++function defaultHermesHome() {
++  if (process.env.HERMES_HOME && process.env.HERMES_HOME.trim()) {
++    return path.resolve(process.env.HERMES_HOME);
++  }
++  return path.join(os.homedir(), ".hermes");
++}
++
++async function pathExists(targetPath) {
++  try {
++    await fs.access(targetPath);
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++async function copyDir(sourceDir, destinationDir) {
++  await fs.mkdir(destinationDir, { recursive: true });
++  const entries = await fs.readdir(sourceDir, { withFileTypes: true });
++
++  for (const entry of entries) {
++    const sourcePath = path.join(sourceDir, entry.name);
++    const destinationPath = path.join(destinationDir, entry.name);
++
++    if (entry.isDirectory()) {
++      await copyDir(sourcePath, destinationPath);
++      continue;
++    }
++
++    await fs.copyFile(sourcePath, destinationPath);
++  }
++}
++
++export async function installHermesPlugin(options = {}) {
++  const force = Boolean(options.force);
++  const hermesHome = options.hermesHome
++    ? path.resolve(options.hermesHome)
++    : defaultHermesHome();
++  const sourceDir = options.pluginSourceDir
++    ? path.resolve(options.pluginSourceDir)
++    : path.join(repoRootFromHere(), "hermes-plugin");
++  const destinationDir = path.join(hermesHome, "plugins", PLUGIN_NAME);
++
++  if (!(await pathExists(sourceDir))) {
++    throw new Error(`Hermes plugin payload not found: ${sourceDir}`);
++  }
++
++  if (await pathExists(destinationDir)) {
++    if (!force) {
++      throw new Error(
++        `Hermes plugin already exists at ${destinationDir}. Re-run with --force to replace it.`,
++      );
++    }
++    await fs.rm(destinationDir, { recursive: true, force: true });
++  }
++
++  await copyDir(sourceDir, destinationDir);
++
++  const message = [
++    `Installed Hermes plugin payload to ${destinationDir}.`,
++    "",
++    "Next steps:",
++    "1. Add SocratiCode to ~/.hermes/config.yaml:",
++    "   mcp_servers:",
++    "     socraticode:",
++    '       command: "npx"',
++    '       args: ["-y", "socraticode"]',
++    '2. Start Hermes with: hermes chat --toolsets "terminal,file,mcp-socraticode,socraticode-plugin"',
++    "3. If tools do not appear, run socraticode_doctor inside Hermes.",
++  ].join("\n");
++
++  return {
++    destinationDir,
++    message,
++  };
++}
++
++const invokedAsMain = process.argv[1]
++  ? import.meta.url === pathToFileURL(process.argv[1]).href
++  : false;
++
++if (invokedAsMain) {
++  installHermesPlugin({ force: process.argv.includes("--force") })
++    .then((result) => {
++      console.log(result.message);
++    })
++    .catch((error) => {
++      console.error(error instanceof Error ? error.message : String(error));
++      process.exit(1);
++    });
++}
+--- a/hermes-plugin/plugin.yaml
++++ b/hermes-plugin/plugin.yaml
+@@ -0,0 +1,5 @@
++name: socraticode
++version: 0.1.0
++description: SocratiCode support for Hermes Agent — bundled workflow skill plus diagnostics.
++provides_tools:
++  - socraticode_doctor
+--- a/hermes-plugin/__init__.py
++++ b/hermes-plugin/__init__.py
+@@ -0,0 +1,43 @@
++"""SocratiCode Hermes plugin registration."""
++
++from __future__ import annotations
++
++import logging
++import shutil
++from pathlib import Path
++
++from . import schemas, tools
++
++logger = logging.getLogger(__name__)
++_PLUGIN_DIR = Path(__file__).parent
++_SKILL_SOURCE = _PLUGIN_DIR / "skill.md"
++
++
++def _skill_destination() -> Path:
++    try:
++        from hermes_cli.config import get_hermes_home  # type: ignore
++
++        return Path(get_hermes_home()) / "skills" / "socraticode" / "SKILL.md"
++    except Exception:
++        return Path.home() / ".hermes" / "skills" / "socraticode" / "SKILL.md"
++
++
++def _install_skill() -> None:
++    destination = _skill_destination()
++
++    if destination.exists() or not _SKILL_SOURCE.exists():
++        return
++
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copy2(_SKILL_SOURCE, destination)
++
++
++def register(ctx):
++    ctx.register_tool(
++        name="socraticode_doctor",
++        toolset="socraticode-plugin",
++        schema=schemas.SOCRATICODE_DOCTOR,
++        handler=tools.socraticode_doctor,
++    )
++    _install_skill()
++    logger.info("SocratiCode Hermes plugin registered")
+--- a/hermes-plugin/schemas.py
++++ b/hermes-plugin/schemas.py
+@@ -0,0 +1,14 @@
++"""Schemas exposed by the SocratiCode Hermes plugin."""
++
++SOCRATICODE_DOCTOR = {
++    "name": "socraticode_doctor",
++    "description": (
++        "Check whether Hermes is configured correctly for SocratiCode. "
++        "Use this when SocratiCode MCP tools are missing, not connecting, or failing."
++    ),
++    "parameters": {
++        "type": "object",
++        "properties": {},
++        "required": [],
++    },
++}
+--- a/hermes-plugin/tools.py
++++ b/hermes-plugin/tools.py
+@@ -0,0 +1,108 @@
++"""Tool handlers for the SocratiCode Hermes plugin."""
++
++from __future__ import annotations
++
++import json
++import os
++import re
++import subprocess
++from pathlib import Path
++
++
++def _hermes_home() -> Path:
++    env_home = os.environ.get("HERMES_HOME")
++    if env_home:
++        return Path(env_home).expanduser()
++
++    try:
++        from hermes_cli.config import get_hermes_home  # type: ignore
++
++        return Path(get_hermes_home())
++    except Exception:
++        return Path.home() / ".hermes"
++
++
++def _config_path() -> Path:
++    return _hermes_home() / "config.yaml"
++
++
++def _skill_path() -> Path:
++    return _hermes_home() / "skills" / "socraticode" / "SKILL.md"
++
++
++def _plugin_path() -> Path:
++    return _hermes_home() / "plugins" / "socraticode"
++
++
++def _run(command: list[str]) -> dict:
++    try:
++        proc = subprocess.run(
++            command,
++            text=True,
++            capture_output=True,
++            timeout=20,
++            check=False,
++        )
++        return {
++            "ok": proc.returncode == 0,
++            "returncode": proc.returncode,
++            "stdout": proc.stdout.strip(),
++            "stderr": proc.stderr.strip(),
++            "command": command,
++        }
++    except FileNotFoundError:
++        return {
++            "ok": False,
++            "returncode": None,
++            "stdout": "",
++            "stderr": f"Command not found: {command[0]}",
++            "command": command,
++        }
++    except subprocess.TimeoutExpired:
++        return {
++            "ok": False,
++            "returncode": None,
++            "stdout": "",
++            "stderr": f"Timed out running: {' '.join(command)}",
++            "command": command,
++        }
++
++
++def _mcp_configured(config_text: str) -> bool:
++    if not config_text.strip():
++        return False
++
++    if "mcp_servers:" not in config_text:
++        return False
++
++    return re.search(r"(?m)^\s*socraticode:\s*$", config_text) is not None
++
++
++def socraticode_doctor(args: dict, **kwargs) -> str:
++    config_path = _config_path()
++    config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
++
++    checks = {
++        "node": _run(["node", "--version"]),
++        "npx": _run(["npx", "--version"]),
++        "docker": _run(["docker", "info"]),
++    }
++
++    return json.dumps(
++        {
++            "ok": True,
++            "plugin_path": str(_plugin_path()),
++            "plugin_present": _plugin_path().exists(),
++            "skill_path": str(_skill_path()),
++            "skill_present": _skill_path().exists(),
++            "config_path": str(config_path),
++            "mcp_configured": _mcp_configured(config_text),
++            "expected_mcp_yaml": (
++                "mcp_servers:\n"
++                "  socraticode:\n"
++                '    command: "npx"\n'
++                '    args: ["-y", "socraticode"]'
++            ),
++            "checks": checks,
++        }
++    )
+--- a/hermes-plugin/skill.md
++++ b/hermes-plugin/skill.md
+@@ -0,0 +1,71 @@
++---
++name: socraticode
++description: Explore indexed codebases with SocratiCode before speculative file reads.
++version: 1.0.0
++metadata:
++  hermes:
++    tags: [codebase, search, architecture, mcp]
++    category: development
++---
++# SocratiCode
++
++Use SocratiCode when the task is to understand an unfamiliar repository, locate features quickly,
++trace dependencies, or answer architecture questions without wasting context on blind file reads.
++
++## When to Use
++
++- The user asks where a feature lives or how a subsystem works.
++- The repository is large enough that exploratory file reads would be expensive.
++- You need dependency information before following imports manually.
++- The answer may depend on schemas, API specs, infrastructure configs, or other non-code artifacts.
++
++## Quick Reference
++
++| Goal | Tool |
++| --- | --- |
++| Check whether a project is indexed | `mcp_socraticode_codebase_status` |
++| Start or resume indexing | `mcp_socraticode_codebase_index` |
++| Search conceptually across the codebase | `mcp_socraticode_codebase_search` |
++| See imports and dependents for a file | `mcp_socraticode_codebase_graph_query` |
++| Find circular dependencies | `mcp_socraticode_codebase_graph_circular` |
++| Discover context artifacts | `mcp_socraticode_codebase_context` |
++| Search schemas, specs, infra docs | `mcp_socraticode_codebase_context_search` |
++| Diagnose Hermes integration issues | `socraticode_doctor` |
++
++## Procedure
++
++1. Start with `mcp_socraticode_codebase_status`.
++   - If the project is not indexed, call `mcp_socraticode_codebase_index`.
++   - Poll `mcp_socraticode_codebase_status` until indexing is complete before searching.
++
++2. Use `mcp_socraticode_codebase_search` before opening files.
++   - Use broad conceptual queries first.
++   - Use exact symbol names only when you already know the identifier you need.
++
++3. Use `mcp_socraticode_codebase_graph_query` before reading transitive dependencies.
++   - Check what a file imports.
++   - Check what depends on that file.
++   - Then read only the most relevant files.
++
++4. Use context artifacts when the question is not purely about code.
++   - Run `mcp_socraticode_codebase_context` to see what artifacts exist.
++   - Run `mcp_socraticode_codebase_context_search` for schemas, API specs, deployment config, and architecture documents.
++
++5. Prefer grep only when the query is an exact identifier, error string, or regex.
++   - SocratiCode is the default for exploration.
++   - Exact-text search is better for already-known strings.
++
++## Pitfalls
++
++- Searching before indexing completes produces weak or empty results.
++- Blind file reads waste context and often miss the most relevant entry points.
++- If SocratiCode tools are missing in Hermes, run `socraticode_doctor` and verify that:
++  - Node.js and `npx` are installed
++  - Docker is available
++  - `~/.hermes/config.yaml` contains the SocratiCode MCP server block
++
++## Verification
++
++- Search results identify the right files before any deep file reading.
++- Graph queries show import and dependent relationships for the file under investigation.
++- Context searches surface non-code artifacts when the question involves infrastructure or domain docs.
+--- a/tests/unit/install-hermes-plugin.test.ts
++++ b/tests/unit/install-hermes-plugin.test.ts
+@@ -0,0 +1,45 @@
++import { describe, expect, it } from "vitest";
++import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++
++import { installHermesPlugin } from "../../scripts/install-hermes-plugin.mjs";
++
++describe("installHermesPlugin", () => {
++  it("copies the Hermes plugin payload into the target Hermes home", async () => {
++    const tempDir = await mkdtemp(path.join(os.tmpdir(), "socraticode-hermes-"));
++    const sourceDir = path.join(tempDir, "source");
++    const hermesHome = path.join(tempDir, "hermes-home");
++
++    await mkdir(sourceDir, { recursive: true });
++    await writeFile(path.join(sourceDir, "plugin.yaml"), "name: socraticode\n", "utf-8");
++    await writeFile(path.join(sourceDir, "skill.md"), "# skill\n", "utf-8");
++
++    const result = await installHermesPlugin({
++      hermesHome,
++      pluginSourceDir: sourceDir,
++    });
++
++    expect(result.destinationDir).toBe(path.join(hermesHome, "plugins", "socraticode"));
++    await expect(
++      readFile(path.join(hermesHome, "plugins", "socraticode", "plugin.yaml"), "utf-8"),
++    ).resolves.toContain("name: socraticode");
++  });
++
++  it("refuses to overwrite an existing installation without force", async () => {
++    const tempDir = await mkdtemp(path.join(os.tmpdir(), "socraticode-hermes-"));
++    const sourceDir = path.join(tempDir, "source");
++    const hermesHome = path.join(tempDir, "hermes-home");
++
++    await mkdir(sourceDir, { recursive: true });
++    await writeFile(path.join(sourceDir, "plugin.yaml"), "name: socraticode\n", "utf-8");
++    await mkdir(path.join(hermesHome, "plugins", "socraticode"), { recursive: true });
++
++    await expect(
++      installHermesPlugin({
++        hermesHome,
++        pluginSourceDir: sourceDir,
++      }),
++    ).rejects.toThrow(/already exists/i);
++  });
++});
